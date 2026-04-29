@@ -13,7 +13,7 @@ export function register(server: McpServer): void {
     },
     async ({ project, fixVersion }) => {
       const me = await getCurrentUser();
-      const jql = `project = "${project}" AND issuetype = Epic AND fixVersion = "${fixVersion}" AND assignee = "${me.emailAddress}" ORDER BY created ASC`;
+      const jql = `project = "${project}" AND issuetype = Epic AND fixVersion = "${fixVersion}" AND assignee = currentUser() ORDER BY created ASC`;
       const issues = await searchIssues(jql, 50);
       return {
         content: [
