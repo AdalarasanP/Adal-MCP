@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { assertExternalWrite } from "../../capabilities.js";
 import { addComment, transitionIssue } from "../../jira.js";
+import { createPage, updatePage, getPage } from "../../confluence.js";
 
 export function register(server: McpServer): void {
   server.tool(
@@ -28,6 +29,71 @@ export function register(server: McpServer): void {
               comment: args.comment,
               statusTransitioned: transitionResult,
               updatedAt: new Date().toISOString(),
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "write_confluence_page",
+    "Create a new Confluence page in a given space",
+    {
+      spaceKey: z.string(),
+      title: z.string(),
+      body: z.string().describe("Page body in Confluence storage format (HTML-like) or plain text"),
+      parentId: z.string().optional().describe("Optional parent page ID to nest under"),
+    },
+    async (args) => {
+      const page = await createPage({
+        spaceKey: args.spaceKey,
+        title: args.title,
+        body: `<p>${args.body.replace(/\n/g, "</p><p>")}</p>`,
+        parentId: args.parentId,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              id: page.id,
+              title: page.title,
+              space: page.space.key,
+              version: page.version.number,
+              url: page._links.webui,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "write_confluence_update",
+    "Update an existing Confluence page by page ID",
+    {
+      pageId: z.string(),
+      title: z.string(),
+      body: z.string().describe("New page body in Confluence storage format (HTML-like) or plain text"),
+    },
+    async (args) => {
+      const existing = await getPage(args.pageId);
+      const updated = await updatePage(
+        args.pageId,
+        args.title,
+        `<p>${args.body.replace(/\n/g, "</p><p>")}</p>`,
+        existing.version.number
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              id: updated.id,
+              title: updated.title,
+              version: updated.version.number,
+              url: updated._links.webui,
             }, null, 2),
           },
         ],
