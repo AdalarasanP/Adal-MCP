@@ -137,3 +137,159 @@ export async function searchIssues(jql: string, maxResults = 20): Promise<JiraSe
     },
   }));
 }
+
+/* ------------------------------------------------------------------ */
+/* SPRINT / BOARD                                                        */
+/* ------------------------------------------------------------------ */
+
+async function agileFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  const { baseUrl, auth } = getConfig();
+  const url = `${baseUrl}/rest/agile/1.0${path}`;
+  return fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(options.headers ?? {}),
+    },
+  });
+}
+
+export interface JiraSprint {
+  id: number;
+  name: string;
+  state: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+export async function getBoardId(projectKey: string): Promise<number> {
+  const res = await agileFetch(`/board?projectKeyOrId=${projectKey}&type=scrum`);
+  if (!res.ok) throw new Error(`Get board failed: ${res.status} ${await res.text()}`);
+  const data = (await res.json()) as { values: Array<{ id: number; name: string }> };
+  if (!data.values.length) throw new Error(`No scrum board found for project ${projectKey}`);
+  return data.values[0].id;
+}
+
+export async function getSprints(projectKey: string): Promise<JiraSprint[]> {
+  const boardId = await getBoardId(projectKey);
+  const res = await agileFetch(`/board/${boardId}/sprint?maxResults=20`);
+  if (!res.ok) throw new Error(`Get sprints failed: ${res.status} ${await res.text()}`);
+  const data = (await res.json()) as { values: JiraSprint[] };
+  return data.values;
+}
+
+/* ------------------------------------------------------------------ */
+/* CREATE / UPDATE ISSUES                                               */
+/* ------------------------------------------------------------------ */
+
+export interface CreateIssueOptions {
+  projectKey: string;
+  issuetype: "Story" | "Task" | "Sub-task" | "Bug" | "Epic";
+  summary: string;
+  description?: string;
+  epicKey?: string;
+  sprintId?: number;
+  storyPoints?: number;
+  assigneeAccountId?: string;
+  labels?: string[];
+  fixVersions?: string[];
+}
+
+export async function createIssue(opts: CreateIssueOptions): Promise<{ key: string; id: string }> {
+  const fields: Record<string, unknown> = {
+    project: { key: opts.projectKey },
+    issuetype: { name: opts.issuetype },
+    summary: opts.summary,
+  };
+
+  if (opts.description) {
+    fields.description = {
+      type: "doc",
+      version: 1,
+      content: [{ type: "paragraph", content: [{ type: "text", text: opts.description }] }],
+    };
+  }
+
+  // Epic link — try parent (next-gen) and classic epic link field
+  if (opts.epicKey) {
+    fields.parent = { key: opts.epicKey };
+  }
+
+  if (opts.sprintId) {
+    fields.customfield_10020 = { id: opts.sprintId };
+  }
+
+  if (opts.storyPoints !== undefined) {
+    fields.customfield_10016 = opts.storyPoints;
+    fields.story_points = opts.storyPoints;
+  }
+
+  if (opts.assigneeAccountId) {
+    fields.assignee = { accountId: opts.assigneeAccountId };
+  }
+
+  if (opts.labels?.length) {
+    fields.labels = opts.labels;
+  }
+
+  if (opts.fixVersions?.length) {
+    fields.fixVersions = opts.fixVersions.map((v) => ({ name: v }));
+  }
+
+  const res = await jiraFetch("/issue", {
+    method: "POST",
+    body: JSON.stringify({ fields }),
+  });
+  if (!res.ok) throw new Error(`Create issue failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<{ key: string; id: string }>;
+}
+
+export async function updateIssue(
+  issueKey: string,
+  fields: Record<string, unknown>
+): Promise<void> {
+  const res = await jiraFetch(`/issue/${issueKey}`, {
+    method: "PUT",
+    body: JSON.stringify({ fields }),
+  });
+  if (!res.ok) throw new Error(`Update issue failed: ${res.status} ${await res.text()}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* ISSUE LINKS (dependencies)                                           */
+/* ------------------------------------------------------------------ */
+
+export async function linkIssues(
+  inwardKey: string,
+  outwardKey: string,
+  linkType: string
+): Promise<void> {
+  const res = await jiraFetch("/issueLink", {
+    method: "POST",
+    body: JSON.stringify({
+      type: { name: linkType },
+      inwardIssue: { key: inwardKey },
+      outwardIssue: { key: outwardKey },
+    }),
+  });
+  if (!res.ok) throw new Error(`Link issues failed: ${res.status} ${await res.text()}`);
+}
+
+export async function getLinkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>> {
+  const res = await jiraFetch("/issueLinkType");
+  if (!res.ok) throw new Error(`Get link types failed: ${res.status} ${await res.text()}`);
+  const data = (await res.json()) as { issueLinkTypes: Array<{ name: string; inward: string; outward: string }> };
+  return data.issueLinkTypes;
+}
+
+/* ------------------------------------------------------------------ */
+/* CURRENT USER                                                          */
+/* ------------------------------------------------------------------ */
+
+export async function getCurrentUser(): Promise<{ accountId: string; displayName: string; emailAddress: string }> {
+  const res = await jiraFetch("/myself");
+  if (!res.ok) throw new Error(`Get current user failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<{ accountId: string; displayName: string; emailAddress: string }>;
+}

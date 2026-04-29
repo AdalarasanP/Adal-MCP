@@ -1,9 +1,62 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getIssue, searchIssues } from "../../jira.js";
+import { getIssue, searchIssues, getSprints, getCurrentUser } from "../../jira.js";
 import { getPage, searchPages } from "../../confluence.js";
 
 export function register(server: McpServer): void {
+  server.tool(
+    "read_jira_epics_for_pi",
+    "Read all epics assigned to current user for a given PI (Fix Version). Use this at the start of PI planning.",
+    {
+      project: z.string().describe("Jira project key e.g. NTWK"),
+      fixVersion: z.string().describe("Fix version value e.g. NTWK.26.PI2"),
+    },
+    async ({ project, fixVersion }) => {
+      const me = await getCurrentUser();
+      const jql = `project = "${project}" AND issuetype = Epic AND fixVersion = "${fixVersion}" AND assignee = "${me.emailAddress}" ORDER BY created ASC`;
+      const issues = await searchIssues(jql, 50);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                assignee: me.displayName,
+                fixVersion,
+                totalEpics: issues.length,
+                epics: issues.map((i) => ({
+                  key: i.key,
+                  summary: i.fields.summary,
+                  status: i.fields.status.name,
+                })),
+              },
+              null, 2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "get_jira_sprints",
+    "List all sprints for a project board (returns sprint IDs, names, states and dates)",
+    {
+      project: z.string().describe("Jira project key e.g. NTWK"),
+    },
+    async ({ project }) => {
+      const sprints = await getSprints(project);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(sprints, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   server.tool(
     "search_jira_stories",
     "Search Jira issues using JQL or natural filters (project, sprint, assignee, status, team)",
