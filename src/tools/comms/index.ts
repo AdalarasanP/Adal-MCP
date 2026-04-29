@@ -2,14 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getTriagedEmails, flagEmail, markRead, createDraftReply, type TriageBucket } from "../../capture/outlook.js";
 import { getOrgContext } from "../../capture/org.js";
-import { isAuthenticated } from "../../capture/graph-auth.js";
 
-function authCheck() {
-  if (!isAuthenticated()) {
-    return "Not authenticated with Microsoft Graph. Run `npm run auth-graph` in the terminal first to sign in with your Marriott account.";
-  }
-  return null;
-}
 
 function formatEmail(e: any, idx: number): string {
   const flag = e.isFlagged ? "🚩 " : "";
@@ -22,15 +15,12 @@ export function registerCommsTools(server: McpServer) {
 
   server.tool(
     "get_email_triage",
-    "Fetch and triage your Outlook inbox. Returns emails bucketed into: respond now, respond by EOD, respond tomorrow morning, respond this week, FYI only. Requires Graph auth.",
+    "Fetch and triage your Outlook inbox. Returns emails bucketed into: respond now, respond by EOD, respond tomorrow morning, respond this week, FYI only. Reads directly from the running Outlook app — no sign-in needed.",
     {
       bucket: z.enum(["now", "eod", "tomorrow", "this-week", "fyi", "all"]).optional().default("all").describe("Which bucket to show"),
       limit: z.number().optional().default(50),
     },
     async ({ bucket, limit }) => {
-      const err = authCheck();
-      if (err) return { content: [{ type: "text", text: err }] };
-
       const { buckets, total } = await getTriagedEmails(limit ?? 50);
 
       const LABELS: Record<TriageBucket | "all", string> = {
@@ -58,12 +48,9 @@ export function registerCommsTools(server: McpServer) {
 
   server.tool(
     "get_my_org",
-    "Show your org structure: your profile, manager, manager's manager (skip-level), and teammates. Pulled from Microsoft Teams/Graph.",
+    "Show your org structure: your profile, manager, manager's manager (skip-level), and teammates. Read from Outlook Exchange address book.",
     {},
     async () => {
-      const err = authCheck();
-      if (err) return { content: [{ type: "text", text: err }] };
-
       const org = await getOrgContext();
 
       const lines = [
@@ -98,8 +85,6 @@ export function registerCommsTools(server: McpServer) {
       emailId: z.string().describe("Email ID from get_email_triage"),
     },
     async ({ emailId }) => {
-      const err = authCheck();
-      if (err) return { content: [{ type: "text", text: err }] };
       await flagEmail(emailId);
       return { content: [{ type: "text", text: "Email flagged for follow-up." }] };
     }
@@ -113,8 +98,6 @@ export function registerCommsTools(server: McpServer) {
       body: z.string().describe("The reply text to draft"),
     },
     async ({ emailId, body }) => {
-      const err = authCheck();
-      if (err) return { content: [{ type: "text", text: err }] };
       const draftId = await createDraftReply(emailId, body);
       return { content: [{ type: "text", text: `Draft reply created (ID: ${draftId}). Open Outlook Drafts to review and send.` }] };
     }

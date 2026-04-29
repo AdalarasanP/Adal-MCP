@@ -1,10 +1,13 @@
 /**
- * Outlook email triage via Microsoft Graph.
- * Fetches unread + flagged emails, scores each for urgency,
- * and buckets into: now / eod / tomorrow / this-week / fyi
+ * Outlook email triage via PowerShell COM automation.
+ * Reads from the already-running Outlook desktop app — no OAuth/Graph API needed.
+ * Works on Marriott-managed machines where Conditional Access blocks device code flow.
  */
 
-import { graphFetch } from "./graph-auth.js";
+import { spawn } from "child_process";
+import { writeFileSync, unlinkSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { getOrgContext } from "./org.js";
 
 export type TriageBucket = "now" | "eod" | "tomorrow" | "this-week" | "fyi";
@@ -14,150 +17,224 @@ export interface EmailSummary {
   subject: string;
   from: string;
   fromEmail: string;
-  receivedAt: string;       // ISO
+  receivedAt: string;
   isRead: boolean;
   isFlagged: boolean;
-  isToMe: boolean;          // true = in To:, false = CC
+  isToMe: boolean;
   bodyPreview: string;
-  jiraKeys: string[];       // extracted NTWK-XXXX references
-  ritm: string[];           // ServiceNow RITMs
+  jiraKeys: string[];
+  ritm: string[];
   bucket: TriageBucket;
-  reason: string;           // why it got this bucket
+  reason: string;
   hoursWaiting: number;
 }
 
-// Keywords that push emails to "now"
-const URGENT_SUBJECTS = ["action required", "urgent", "please approve", "approval needed", "asap", "critical", "p1", "p0", "sev1", "sev2", "incident", "outage"];
-const FYI_SUBJECTS = ["fyi", "no action", "unsubscribe", "newsletter", "digest", "automated notification", "noreply"];
+const URGENT_KEYWORDS = ["action required", "urgent", "please approve", "approval needed", "asap", "critical", "p1", "p0", "sev1", "sev2", "incident", "outage"];
+const FYI_KEYWORDS = ["fyi", "no action", "newsletter", "digest", "automated notification"];
 
-// Extract Jira keys and RITM numbers from text
+// ── PowerShell runner ──────────────────────────────────────────────────────
+
+function runPS(script: string): Promise<string> {
+  const tmpFile = join(tmpdir(), `mcp-ps-${Date.now()}.ps1`);
+  writeFileSync(tmpFile, script, "utf8");
+  return new Promise((resolve, reject) => {
+    const ps = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", tmpFile]);
+    let out = "", err = "";
+    ps.stdout.on("data", d => out += d.toString());
+    ps.stderr.on("data", d => err += d.toString());
+    ps.on("close", code => {
+      try { unlinkSync(tmpFile); } catch {}
+      if (code !== 0) reject(new Error(err.trim() || `PowerShell exited ${code}`));
+      else resolve(out.trim());
+    });
+  });
+}
+
+// ── Scoring logic (pure TypeScript) ───────────────────────────────────────
+
 function extractRefs(text: string): { jiraKeys: string[]; ritm: string[] } {
-  const jiraKeys = [...new Set((text.match(/NTWK-\d+/gi) ?? []).map(k => k.toUpperCase()))];
-  const ritm = [...new Set((text.match(/RITM\d+/gi) ?? []).map(k => k.toUpperCase()))];
-  return { jiraKeys, ritm };
+  return {
+    jiraKeys: [...new Set((text.match(/NTWK-\d+/gi) ?? []).map(k => k.toUpperCase()))],
+    ritm: [...new Set((text.match(/RITM\d+/gi) ?? []).map(k => k.toUpperCase()))],
+  };
 }
 
 function hoursSince(iso: string): number {
-  return (Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60);
+  return (Date.now() - new Date(iso).getTime()) / 3_600_000;
 }
 
-function isWorkHours(): boolean {
-  const h = new Date().getHours();
-  const day = new Date().getDay(); // 0=Sun 6=Sat
-  return day >= 1 && day <= 5 && h >= 8 && h < 17;
-}
+function scoreEmail(e: any, priorityEmails: Set<string>, peers: string[]): { bucket: TriageBucket; reason: string } {
+  const subjectLc = (e.subject ?? "").toLowerCase();
+  const fromEmail = (e.fromEmail ?? "").toLowerCase();
+  const { isToMe, isFlagged } = e;
+  const hours = hoursSince(e.receivedAt);
+  const refs = extractRefs((e.subject ?? "") + " " + (e.bodyPreview ?? ""));
+  const hasRefs = refs.jiraKeys.length > 0 || refs.ritm.length > 0;
 
-function scoreEmail(email: any, priorityEmails: Set<string>, peers: string[]): { bucket: TriageBucket; reason: string } {
-  const subjectLc = (email.subject ?? "").toLowerCase();
-  const fromEmail = (email.from?.emailAddress?.address ?? "").toLowerCase();
-  const isToMe = (email.toRecipients ?? []).some((r: any) => r.emailAddress?.address?.toLowerCase().includes("apand270"));
-  const flagged = email.flag?.flagStatus === "flagged";
-  const hours = hoursSince(email.receivedDateTime);
-  const refs = extractRefs(email.subject + " " + email.bodyPreview);
-  const hasJiraOrRitm = refs.jiraKeys.length > 0 || refs.ritm.length > 0;
-
-  // FYI-only signals
   if (!isToMe) {
-    if (FYI_SUBJECTS.some(k => subjectLc.includes(k))) return { bucket: "fyi", reason: "CC only, FYI keyword" };
-    if (!flagged && !hasJiraOrRitm) return { bucket: "fyi", reason: "CC only, no action needed" };
+    if (FYI_KEYWORDS.some(k => subjectLc.includes(k))) return { bucket: "fyi", reason: "CC only, FYI keyword" };
+    if (!isFlagged && !hasRefs) return { bucket: "fyi", reason: "CC only" };
   }
-
-  // Immediate signals
-  if (priorityEmails.has(fromEmail) && URGENT_SUBJECTS.some(k => subjectLc.includes(k))) {
-    return { bucket: "now", reason: "Manager/skip-level + urgent keyword" };
-  }
-  if (flagged && hours > 4) return { bucket: "now", reason: "Flagged and waiting >4h" };
-  if (URGENT_SUBJECTS.some(k => subjectLc.includes(k)) && isToMe) return { bucket: "now", reason: "Urgent keyword in To:" };
+  if (priorityEmails.has(fromEmail) && URGENT_KEYWORDS.some(k => subjectLc.includes(k))) return { bucket: "now", reason: "Manager + urgent keyword" };
+  if (isFlagged && hours > 4) return { bucket: "now", reason: "Flagged and waiting >4h" };
+  if (URGENT_KEYWORDS.some(k => subjectLc.includes(k)) && isToMe) return { bucket: "now", reason: "Urgent keyword" };
   if (priorityEmails.has(fromEmail) && isToMe) return { bucket: "eod", reason: "From manager/skip-level" };
-
-  // Waiting too long
   if (hours > 48 && isToMe) return { bucket: "now", reason: `Waiting ${Math.round(hours)}h — overdue` };
   if (hours > 24 && isToMe) return { bucket: "eod", reason: `Waiting ${Math.round(hours)}h` };
-
-  // Peer emails with Jira/RITM refs
-  if (peers.includes(fromEmail) && hasJiraOrRitm && isToMe) return { bucket: "eod", reason: "Teammate + Jira/RITM reference" };
-
-  // Flagged
-  if (flagged) return { bucket: "eod", reason: "Flagged by you" };
-
-  // Has Jira/RITM ref
-  if (hasJiraOrRitm && isToMe) return { bucket: "tomorrow", reason: "Has Jira/RITM reference" };
-
-  // Regular unread To: email
-  if (isToMe && !email.isRead) return { bucket: "this-week", reason: "Unread, addressed to you" };
-
-  return { bucket: "fyi", reason: "No action signal detected" };
+  if (peers.includes(fromEmail) && hasRefs && isToMe) return { bucket: "eod", reason: "Teammate + Jira/RITM ref" };
+  if (isFlagged) return { bucket: "eod", reason: "Flagged" };
+  if (hasRefs && isToMe) return { bucket: "tomorrow", reason: "Has Jira/RITM reference" };
+  if (isToMe && !e.isRead) return { bucket: "this-week", reason: "Unread, addressed to you" };
+  return { bucket: "fyi", reason: "No action signal" };
 }
 
-/** Fetch and triage emails */
+// ── PowerShell COM script ──────────────────────────────────────────────────
+
+const FETCH_EMAILS_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+try {
+    $ol = New-Object -ComObject Outlook.Application
+    $ns = $ol.GetNamespace("MAPI")
+    $inbox = $ns.GetDefaultFolder(6)
+
+    # Get current user email for isToMe check
+    $myEmail = ""
+    try { $myEmail = $ns.CurrentUser.AddressEntry.GetExchangeUser().PrimarySmtpAddress.ToLower() } catch {}
+
+    function Get-SenderSMTP($item) {
+        try {
+            if ($item.SenderEmailType -eq "EX") {
+                $eu = $item.Sender.GetExchangeUser()
+                if ($eu) { return $eu.PrimarySmtpAddress.ToLower() }
+            }
+        } catch {}
+        $a = $item.SenderEmailAddress
+        if ($a) { return $a.ToLower() }
+        return ""
+    }
+
+    function Get-IsToMe($item, $myEmail) {
+        try {
+            foreach ($r in $item.Recipients) {
+                if ($r.Type -eq 1) {
+                    $addr = ""
+                    try { $eu = $r.AddressEntry.GetExchangeUser(); if ($eu) { $addr = $eu.PrimarySmtpAddress.ToLower() } } catch {}
+                    if (!$addr) { $addr = $r.Address.ToLower() }
+                    if ($myEmail -and $addr -eq $myEmail) { return $true }
+                    if ($addr -like ("*" + $env:USERNAME.ToLower() + "*")) { return $true }
+                }
+            }
+        } catch {}
+        return $false
+    }
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    $emails = @()
+
+    foreach ($filter in @("[UnRead] = True", "[FlagStatus] = 2")) {
+        $items = $inbox.Items.Restrict($filter)
+        $items.Sort("[ReceivedTime]", $true)
+        $n = 0
+        foreach ($item in $items) {
+            if ($n -ge 50) { break }
+            if ($item.Class -ne 43) { continue }
+            if (!$seen.Add($item.EntryID)) { continue }
+            $body = try { $item.Body -replace "[\r\n\t ]+", " " } catch { "" }
+            $preview = if ($body.Length -gt 200) { $body.Substring(0,200) } else { $body }
+            $emails += [PSCustomObject]@{
+                id          = $item.EntryID
+                subject     = if ($item.Subject)    { $item.Subject }    else { "" }
+                from        = if ($item.SenderName) { $item.SenderName } else { "" }
+                fromEmail   = (Get-SenderSMTP $item)
+                receivedAt  = $item.ReceivedTime.ToString("o")
+                isRead      = (!$item.UnRead)
+                isFlagged   = ($item.FlagStatus -eq 2)
+                isToMe      = (Get-IsToMe $item $myEmail)
+                bodyPreview = $preview
+            }
+            $n++
+        }
+    }
+
+    if ($emails.Count -eq 0) { Write-Output "[]"; exit 0 }
+    $json = ([array]$emails) | ConvertTo-Json -Depth 2 -Compress
+    if (!$json.StartsWith("[")) { $json = "[$json]" }
+    Write-Output $json
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
+`;
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
 export async function getTriagedEmails(maxEmails = 100): Promise<{
   buckets: Record<TriageBucket, EmailSummary[]>;
   total: number;
 }> {
   const org = await getOrgContext();
-  const peerEmails = org.peers.map(p => p.mail);
+  const peerEmails = org.peers.map(p => p.mail.toLowerCase());
 
-  // Fetch unread inbox + flagged
-  const [unreadRes, flaggedRes] = await Promise.all([
-    graphFetch(`/me/mailFolders/Inbox/messages?$filter=isRead eq false&$top=${maxEmails}&$select=id,subject,from,toRecipients,receivedDateTime,isRead,flag,bodyPreview`),
-    graphFetch(`/me/messages?$filter=flag/flagStatus eq 'flagged'&$top=50&$select=id,subject,from,toRecipients,receivedDateTime,isRead,flag,bodyPreview`),
-  ]);
-
-  // Deduplicate by id
-  const seen = new Set<string>();
-  const emails: any[] = [];
-  for (const e of [...(unreadRes.value ?? []), ...(flaggedRes.value ?? [])]) {
-    if (!seen.has(e.id)) { seen.add(e.id); emails.push(e); }
+  const raw = await runPS(FETCH_EMAILS_SCRIPT);
+  let items: any[] = [];
+  try {
+    const parsed = JSON.parse(raw);
+    items = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+  } catch {
+    throw new Error(`Failed to parse Outlook COM data: ${raw.slice(0, 300)}`);
   }
 
   const buckets: Record<TriageBucket, EmailSummary[]> = { now: [], eod: [], tomorrow: [], "this-week": [], fyi: [] };
 
-  for (const e of emails) {
+  for (const e of items.slice(0, maxEmails)) {
     const { bucket, reason } = scoreEmail(e, org.priorityEmails, peerEmails);
     const refs = extractRefs((e.subject ?? "") + " " + (e.bodyPreview ?? ""));
-    buckets[bucket].push({
-      id: e.id,
-      subject: e.subject ?? "(no subject)",
-      from: e.from?.emailAddress?.name ?? "",
-      fromEmail: (e.from?.emailAddress?.address ?? "").toLowerCase(),
-      receivedAt: e.receivedDateTime,
-      isRead: e.isRead,
-      isFlagged: e.flag?.flagStatus === "flagged",
-      isToMe: (e.toRecipients ?? []).some((r: any) => r.emailAddress?.address?.toLowerCase().includes("apand270")),
-      bodyPreview: (e.bodyPreview ?? "").slice(0, 200),
-      jiraKeys: refs.jiraKeys,
-      ritm: refs.ritm,
-      bucket,
-      reason,
-      hoursWaiting: Math.round(hoursSince(e.receivedDateTime)),
-    });
+    buckets[bucket].push({ ...e, jiraKeys: refs.jiraKeys, ritm: refs.ritm, bucket, reason, hoursWaiting: Math.round(hoursSince(e.receivedAt)) });
   }
 
-  return { buckets, total: emails.length };
+  return { buckets, total: items.length };
 }
 
-/** Flag an email for follow-up */
 export async function flagEmail(emailId: string): Promise<void> {
-  await graphFetch(`/me/messages/${emailId}`, {
-    method: "PATCH",
-    body: JSON.stringify({ flag: { flagStatus: "flagged" } }),
-  });
+  const safeId = emailId.replace(/'/g, "");
+  await runPS(`
+$ol = New-Object -ComObject Outlook.Application
+$ns = $ol.GetNamespace("MAPI")
+$item = $ns.GetItemFromID('${safeId}')
+$item.FlagStatus = 2
+$item.Save()
+`);
 }
 
-/** Mark email as read */
 export async function markRead(emailId: string): Promise<void> {
-  await graphFetch(`/me/messages/${emailId}`, {
-    method: "PATCH",
-    body: JSON.stringify({ isRead: true }),
-  });
+  const safeId = emailId.replace(/'/g, "");
+  await runPS(`
+$ol = New-Object -ComObject Outlook.Application
+$ns = $ol.GetNamespace("MAPI")
+$item = $ns.GetItemFromID('${safeId}')
+$item.UnRead = $false
+$item.Save()
+`);
 }
 
-/** Create a draft reply */
 export async function createDraftReply(emailId: string, body: string): Promise<string> {
-  const draft = await graphFetch(`/me/messages/${emailId}/createReply`, { method: "POST", body: "{}" });
-  await graphFetch(`/me/messages/${draft.id}`, {
-    method: "PATCH",
-    body: JSON.stringify({ body: { contentType: "Text", content: body } }),
-  });
-  return draft.id;
+  const safeId = emailId.replace(/'/g, "");
+  const bodyFile = join(tmpdir(), `mcp-draft-${Date.now()}.txt`).replace(/\\/g, "/");
+  writeFileSync(bodyFile, body, "utf8");
+  const script = `
+$ol = New-Object -ComObject Outlook.Application
+$ns = $ol.GetNamespace("MAPI")
+$item = $ns.GetItemFromID('${safeId}')
+$reply = $item.Reply()
+$draftBody = [System.IO.File]::ReadAllText('${bodyFile}')
+$reply.Body = $draftBody + [Environment]::NewLine + [Environment]::NewLine + $reply.Body
+$reply.Save()
+Write-Output $reply.EntryID
+`;
+  try {
+    return (await runPS(script)).trim();
+  } finally {
+    try { unlinkSync(bodyFile.replace(/\//g, "\\")); } catch {}
+  }
 }
+

@@ -1,17 +1,19 @@
 /**
- * Microsoft Graph org structure — fetches user profile, manager chain, and team.
- * Used to determine email priority (messages from manager = high priority).
+ * Org structure via Outlook COM + Exchange Global Address List.
+ * No Graph API or OAuth needed — reads from the running Outlook session.
  */
 
-import { graphFetch } from "./graph-auth.js";
+import { spawn } from "child_process";
+import { writeFileSync, unlinkSync } from "fs";
+import { tmpdir } from "os";
 import fs from "fs";
 import path from "path";
 
 const ORG_CACHE_FILE = "C:/Users/apand270/.adal-agent/org-cache.json";
-const ORG_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
+const ORG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface UserProfile {
-  id: string;
+  id: string;          // empty string for COM-sourced entries (no Azure AD ID needed)
   displayName: string;
   mail: string;
   jobTitle: string;
@@ -21,83 +23,121 @@ export interface UserProfile {
 export interface OrgContext {
   me: UserProfile;
   manager: UserProfile | null;
-  managerManager: UserProfile | null;   // skip-level
-  peers: UserProfile[];                  // teammates (manager's direct reports excl. me)
-  directReports: UserProfile[];          // my direct reports (if any)
-  priorityEmails: Set<string>;           // email addresses that get high priority
+  managerManager: UserProfile | null;
+  peers: UserProfile[];
+  directReports: UserProfile[];
+  priorityEmails: Set<string>;
 }
 
-async function fetchUser(id: string): Promise<UserProfile | null> {
-  try {
-    const u = await graphFetch(`/users/${id}?$select=id,displayName,mail,jobTitle,department`);
-    return { id: u.id, displayName: u.displayName, mail: u.mail?.toLowerCase() ?? "", jobTitle: u.jobTitle ?? "", department: u.department ?? "" };
-  } catch { return null; }
+// ── PowerShell runner (shared with outlook.ts) ────────────────────────────
+
+function runPS(script: string): Promise<string> {
+  const tmpFile = path.join(tmpdir(), `mcp-org-${Date.now()}.ps1`);
+  writeFileSync(tmpFile, script, "utf8");
+  return new Promise((resolve, reject) => {
+    const ps = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", tmpFile]);
+    let out = "", err = "";
+    ps.stdout.on("data", d => out += d.toString());
+    ps.stderr.on("data", d => err += d.toString());
+    ps.on("close", code => {
+      try { unlinkSync(tmpFile); } catch {}
+      if (code !== 0) reject(new Error(err.trim() || `PowerShell exited ${code}`));
+      else resolve(out.trim());
+    });
+  });
 }
 
-async function fetchDirectReports(userId: string): Promise<UserProfile[]> {
-  try {
-    const res = await graphFetch(`/users/${userId}/directReports?$select=id,displayName,mail,jobTitle,department`);
-    return (res.value ?? []).map((u: any) => ({
-      id: u.id, displayName: u.displayName, mail: u.mail?.toLowerCase() ?? "",
-      jobTitle: u.jobTitle ?? "", department: u.department ?? "",
-    }));
-  } catch { return []; }
+const ORG_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+try {
+    $ol = New-Object -ComObject Outlook.Application
+    $ns = $ol.GetNamespace("MAPI")
+    $me = $ns.CurrentUser.AddressEntry.GetExchangeUser()
+    if ($null -eq $me) { Write-Error "Could not get Exchange user"; exit 1 }
+
+    function User-ToObj($eu) {
+        if ($null -eq $eu) { return $null }
+        [PSCustomObject]@{
+            displayName = if ($eu.Name)                 { $eu.Name }                 else { "" }
+            mail        = if ($eu.PrimarySmtpAddress)   { $eu.PrimarySmtpAddress.ToLower() } else { "" }
+            jobTitle    = if ($eu.JobTitle)             { $eu.JobTitle }             else { "" }
+            department  = if ($eu.Department)           { $eu.Department }           else { "" }
+        }
+    }
+
+    $mgr = $null
+    try { $mgr = $me.GetExchangeUserManager() } catch {}
+    $mgrMgr = $null
+    if ($null -ne $mgr) { try { $mgrMgr = $mgr.GetExchangeUserManager() } catch {} }
+
+    $peers = @()
+    if ($null -ne $mgr) {
+        try {
+            foreach ($r in @($mgr.GetDirectReports())) {
+                $dr = $r.GetExchangeUser()
+                if ($null -ne $dr -and $dr.PrimarySmtpAddress -ne $me.PrimarySmtpAddress) {
+                    $peers += User-ToObj $dr
+                }
+            }
+        } catch {}
+    }
+
+    $dirReports = @()
+    try {
+        foreach ($r in @($me.GetDirectReports())) {
+            $dr = $r.GetExchangeUser()
+            if ($null -ne $dr) { $dirReports += User-ToObj $dr }
+        }
+    } catch {}
+
+    $result = [PSCustomObject]@{
+        me            = User-ToObj $me
+        manager       = User-ToObj $mgr
+        managerManager = User-ToObj $mgrMgr
+        peers         = if ($peers.Count -gt 0) { [array]$peers } else { @() }
+        directReports = if ($dirReports.Count -gt 0) { [array]$dirReports } else { @() }
+    }
+    $result | ConvertTo-Json -Depth 4 -Compress
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
+`;
+
+function toProfile(raw: any): UserProfile | null {
+  if (!raw) return null;
+  return { id: "", displayName: raw.displayName ?? "", mail: (raw.mail ?? "").toLowerCase(), jobTitle: raw.jobTitle ?? "", department: raw.department ?? "" };
 }
 
-/** Fetch full org context — cached for 1 day */
+/** Fetch org context from Outlook Exchange GAL — cached for 1 day */
 export async function getOrgContext(): Promise<OrgContext> {
-  // Check cache
+  // Serve from cache
   if (fs.existsSync(ORG_CACHE_FILE)) {
     const stat = fs.statSync(ORG_CACHE_FILE);
     if (Date.now() - stat.mtimeMs < ORG_CACHE_TTL_MS) {
       const cached = JSON.parse(fs.readFileSync(ORG_CACHE_FILE, "utf8"));
-      cached.priorityEmails = new Set(cached.priorityEmailsList);
+      cached.priorityEmails = new Set<string>(cached.priorityEmailsList ?? []);
       return cached as OrgContext;
     }
   }
 
-  // Fetch me
-  const meRaw = await graphFetch("/me?$select=id,displayName,mail,jobTitle,department");
-  const me: UserProfile = {
-    id: meRaw.id, displayName: meRaw.displayName,
-    mail: meRaw.mail?.toLowerCase() ?? "", jobTitle: meRaw.jobTitle ?? "",
-    department: meRaw.department ?? "",
-  };
+  const raw = JSON.parse(await runPS(ORG_SCRIPT));
+  const me = toProfile(raw.me)!;
+  const manager = toProfile(raw.manager);
+  const managerManager = toProfile(raw.managerManager);
+  const peers: UserProfile[] = Array.isArray(raw.peers) ? raw.peers.map(toProfile).filter(Boolean) as UserProfile[] : [];
+  const directReports: UserProfile[] = Array.isArray(raw.directReports) ? raw.directReports.map(toProfile).filter(Boolean) as UserProfile[] : [];
 
-  // Fetch manager
-  let manager: UserProfile | null = null;
-  let managerManager: UserProfile | null = null;
-  let peers: UserProfile[] = [];
-  try {
-    const mgr = await graphFetch("/me/manager?$select=id,displayName,mail,jobTitle,department");
-    manager = { id: mgr.id, displayName: mgr.displayName, mail: mgr.mail?.toLowerCase() ?? "", jobTitle: mgr.jobTitle ?? "", department: mgr.department ?? "" };
-
-    // Fetch skip-level
-    try {
-      const mmRaw = await graphFetch(`/users/${manager.id}/manager?$select=id,displayName,mail,jobTitle,department`);
-      managerManager = { id: mmRaw.id, displayName: mmRaw.displayName, mail: mmRaw.mail?.toLowerCase() ?? "", jobTitle: mmRaw.jobTitle ?? "", department: mmRaw.department ?? "" };
-    } catch { /* no skip-level */ }
-
-    // Fetch peers (manager's direct reports)
-    const allReports = await fetchDirectReports(manager.id);
-    peers = allReports.filter(u => u.id !== me.id);
-  } catch { /* no manager found */ }
-
-  // Fetch my direct reports
-  const directReports = await fetchDirectReports(me.id);
-
-  // Build priority email set
   const priorityEmails = new Set<string>();
   if (manager?.mail) priorityEmails.add(manager.mail);
   if (managerManager?.mail) priorityEmails.add(managerManager.mail);
-  // Peers are medium priority — not in high set
 
   const ctx: OrgContext = { me, manager, managerManager, peers, directReports, priorityEmails };
 
-  // Cache it
   const dir = path.dirname(ORG_CACHE_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(ORG_CACHE_FILE, JSON.stringify({ ...ctx, priorityEmailsList: Array.from(priorityEmails) }), "utf8");
 
   return ctx;
 }
+

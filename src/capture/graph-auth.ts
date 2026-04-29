@@ -87,27 +87,9 @@ export async function getAccessToken(): Promise<string> {
     } catch { /* fall through */ }
   }
 
-  // 2. Integrated Windows Authentication — uses current Windows/Kerberos session.
-  //    Works on domain-joined machines without any browser prompt.
-  //    Marriott Conditional Access allows this flow (compliant device + corp network).
-  try {
-    console.log("Attempting Integrated Windows Authentication (IWA)...");
-    const result = await pca.acquireTokenByIntegratedWindowsAuth({
-      scopes: SCOPES,
-      username: UPN,
-    });
-    if (result?.accessToken) {
-      console.log("IWA authentication successful.");
-      _account = result.account;
-      return result.accessToken;
-    }
-  } catch (iwaErr: any) {
-    console.warn(`IWA failed (${iwaErr?.message ?? iwaErr}), falling back to device code...`);
-  }
-
-  // 3. Device code fallback
-  console.log("\nIWA not available. Using device code flow:");
-  console.log("NOTE: If Marriott Conditional Access blocks this, use a corporate browser instead.\n");
+  // 2. Device code flow (IWA not used — Marriott Conditional Access blocks Graph OAuth;
+  //    email/org reads now go through Outlook COM. graph-auth is kept for future use.)
+  console.log("\nGraph API device code flow (Outlook COM is the primary path):");
   const result = await pca.acquireTokenByDeviceCode({
     scopes: SCOPES,
     deviceCodeCallback: (response) => {
