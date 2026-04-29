@@ -1,7 +1,34 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { getIssue } from "../../jira.js";
 
 export function register(server: McpServer): void {
+  server.tool(
+    "read_jira_story",
+    "Fetch a Jira story's details (summary, status, assignee, priority, comment count)",
+    {
+      jiraKey: z.string(),
+    },
+    async ({ jiraKey }) => {
+      const issue = await getIssue(jiraKey);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              key: issue.key,
+              summary: issue.fields.summary,
+              status: issue.fields.status.name,
+              assignee: issue.fields.assignee?.displayName ?? "Unassigned",
+              priority: issue.fields.priority?.name ?? "None",
+              comments: issue.fields.comment.total,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   server.tool(
     "read_panorama_config",
     "Read Panorama firewall configuration (read-only)",

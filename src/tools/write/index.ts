@@ -1,30 +1,38 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { assertExternalWrite } from "../../capabilities.js";
+import { addComment, transitionIssue } from "../../jira.js";
 
 export function register(server: McpServer): void {
   server.tool(
     "write_jira_update",
-    "Update Jira story with progress",
+    "Post a comment on a Jira story and optionally transition its status",
     {
       jiraKey: z.string(),
       comment: z.string(),
       proposedStatus: z.string().optional(),
     },
-    async (args) => ({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            mode: "WRITE",
-            system: "jira",
-            ...args,
-            updatedAt: new Date().toISOString(),
-            note: "Replace with real Jira REST API later",
-          }, null, 2),
-        },
-      ],
-    })
+    async (args) => {
+      const commentResult = await addComment(args.jiraKey, args.comment);
+      let transitionResult: string | null = null;
+      if (args.proposedStatus) {
+        transitionResult = await transitionIssue(args.jiraKey, args.proposedStatus);
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              jiraKey: args.jiraKey,
+              commentId: commentResult.id,
+              comment: args.comment,
+              statusTransitioned: transitionResult,
+              updatedAt: new Date().toISOString(),
+            }, null, 2),
+          },
+        ],
+      };
+    }
   );
 
   server.tool(
