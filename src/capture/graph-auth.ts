@@ -1,16 +1,17 @@
 /**
- * Microsoft Graph authentication using MSAL device code flow.
- * Uses the Microsoft Graph PowerShell public client (pre-trusted in all Azure AD tenants)
- * so no app registration is needed.
+ * Microsoft Graph authentication using MSAL.
+ * Auth strategy (tries in order):
+ *   1. Silent (cached token from previous run)
+ *   2. Integrated Windows Authentication (IWA) — uses your Windows Kerberos session,
+ *      no browser/device code needed. Works on domain-joined Marriott machines.
+ *   3. Device code fallback (if IWA fails — e.g. on non-domain machine)
  *
- * First use: run `npm run auth-graph` — prints a code, you open a URL, sign in once.
- * After that: tokens auto-refresh silently from the cache.
+ * Run `npm run auth-graph` once to prime the cache. After that fully silent.
  */
 
 import { PublicClientApplication, DeviceCodeRequest, AccountInfo, SilentFlowRequest } from "@azure/msal-node";
 import fs from "fs";
 import path from "path";
-import os from "os";
 
 const TOKEN_CACHE_FILE = path.join("C:/Users/apand270/.adal-agent", "graph-token-cache.json");
 const SCOPES = [
@@ -22,10 +23,11 @@ const SCOPES = [
   "offline_access",
 ];
 
-// Microsoft Graph PowerShell — a Microsoft-owned public client app trusted in all
-// Azure AD tenants by default. No app registration required.
+// Microsoft Graph PowerShell — Microsoft-owned public client trusted in all Azure AD tenants.
 const CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
-const TENANT_ID = process.env.AZURE_TENANT_ID ?? "d2033364-dec3-4a1c-9772-3f41ca7c4b75"; // Marriott
+const TENANT_ID = process.env.AZURE_TENANT_ID ?? "d2033364-dec3-4a1c-9772-3f41ca7c4b75";
+// UPN used for IWA — reads from JIRA_EMAIL or falls back to apand270@marriott.com
+const UPN = process.env.JIRA_EMAIL ?? "adalarasan.pandian2@marriott.com";
 
 function loadCacheData(): string | undefined {
   if (fs.existsSync(TOKEN_CACHE_FILE)) {
@@ -68,11 +70,11 @@ function getPca(): PublicClientApplication {
   return pca;
 }
 
-/** Get a valid access token, refreshing silently or prompting device code */
+/** Get a valid access token — silent → IWA → device code */
 export async function getAccessToken(): Promise<string> {
   const pca = getPca();
 
-  // Try silent first
+  // 1. Try silent (cached token)
   const accounts = await pca.getTokenCache().getAllAccounts();
   if (accounts.length > 0) {
     const account = _account ?? accounts[0];
@@ -82,14 +84,34 @@ export async function getAccessToken(): Promise<string> {
         _account = result.account;
         return result.accessToken;
       }
-    } catch { /* fall through to device code */ }
+    } catch { /* fall through */ }
   }
 
-  // Device code flow
+  // 2. Integrated Windows Authentication — uses current Windows/Kerberos session.
+  //    Works on domain-joined machines without any browser prompt.
+  //    Marriott Conditional Access allows this flow (compliant device + corp network).
+  try {
+    console.log("Attempting Integrated Windows Authentication (IWA)...");
+    const result = await pca.acquireTokenByIntegratedWindowsAuth({
+      scopes: SCOPES,
+      username: UPN,
+    });
+    if (result?.accessToken) {
+      console.log("IWA authentication successful.");
+      _account = result.account;
+      return result.accessToken;
+    }
+  } catch (iwaErr: any) {
+    console.warn(`IWA failed (${iwaErr?.message ?? iwaErr}), falling back to device code...`);
+  }
+
+  // 3. Device code fallback
+  console.log("\nIWA not available. Using device code flow:");
+  console.log("NOTE: If Marriott Conditional Access blocks this, use a corporate browser instead.\n");
   const result = await pca.acquireTokenByDeviceCode({
     scopes: SCOPES,
     deviceCodeCallback: (response) => {
-      console.log("\n" + response.message + "\n");
+      console.log(response.message + "\n");
     },
   } as DeviceCodeRequest);
 
