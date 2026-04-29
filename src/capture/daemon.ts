@@ -36,32 +36,15 @@ function appendEvent(event: Record<string, unknown>) {
 
 // ── Active Window Tracking ──────────────────────────────────────────────────
 
-// Uses PowerShell to get foreground window title + process name
-const PS_FOREGROUND = `
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-}
-"@
-$hwnd = [Win32]::GetForegroundWindow()
-$sb = New-Object System.Text.StringBuilder 512
-[Win32]::GetWindowText($hwnd, $sb, 512) | Out-Null
-$pid = 0
-[Win32]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
-$proc = (Get-Process -Id $pid -ErrorAction SilentlyContinue).Name
-Write-Output "$proc|$($sb.ToString())"
-`.trim();
+// Uses PowerShell to get the process with the topmost main window
+const PS_ACTIVE_WIN = `$p = Get-Process | Where-Object {$_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -ne ''} | Sort-Object StartTime -Descending | Select-Object -First 1; if ($p) { Write-Output ($p.Name + '|' + $p.MainWindowTitle) }`;
 
 let lastWindow = "";
 let lastWindowTime = 0;
 
 function pollActiveWindow() {
   try {
-    const result = execSync(`powershell -NoProfile -Command "${PS_FOREGROUND.replace(/\n/g, " ")}"`, { timeout: 2000 }).toString().trim();
+    const result = execSync(`powershell -NoProfile -Command "${PS_ACTIVE_WIN}"`, { timeout: 3000 }).toString().trim();
     const [procName, ...titleParts] = result.split("|");
     const title = titleParts.join("|").trim();
     const key = `${procName}|${title}`;
