@@ -41,8 +41,16 @@ function runPS(script: string): Promise<string> {
     ps.stderr.on("data", d => err += d.toString());
     ps.on("close", code => {
       try { unlinkSync(tmpFile); } catch {}
-      if (code !== 0) reject(new Error(err.trim() || `PowerShell exited ${code}`));
-      else resolve(out.trim());
+      if (code !== 0) {
+        const msg = err.trim() || `PowerShell exited ${code}`;
+        if (msg.includes("null-valued") || msg.includes("Cannot call a method") || msg.includes("Cannot instantiate")) {
+          reject(new Error("Outlook is not running or not connected to Exchange. Please open Outlook and ensure it is fully loaded, then retry."));
+        } else {
+          reject(new Error(msg));
+        }
+      } else {
+        resolve(out.trim());
+      }
     });
   });
 }
@@ -99,8 +107,9 @@ try {
     }
     $result | ConvertTo-Json -Depth 4 -Compress
 } catch {
-    $msg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
-    Write-Error $msg
+    $errMsg = 'Outlook COM error'
+    try { if ($_.Exception -and $_.Exception.Message) { $errMsg = $_.Exception.Message } } catch {}
+    Write-Error $errMsg
     exit 1
 }
 `;

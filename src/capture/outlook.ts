@@ -169,8 +169,9 @@ try {
     if (!$json.StartsWith("[")) { $json = "[$json]" }
     Write-Output $json
 } catch {
-    $msg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
-    Write-Error $msg
+    $errMsg = 'Outlook COM error'
+    try { if ($_.Exception -and $_.Exception.Message) { $errMsg = $_.Exception.Message } } catch {}
+    Write-Error $errMsg
     exit 1
 }
 `;
