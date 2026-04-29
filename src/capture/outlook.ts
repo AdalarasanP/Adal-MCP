@@ -44,8 +44,16 @@ function runPS(script: string): Promise<string> {
     ps.stderr.on("data", d => err += d.toString());
     ps.on("close", code => {
       try { unlinkSync(tmpFile); } catch {}
-      if (code !== 0) reject(new Error(err.trim() || `PowerShell exited ${code}`));
-      else resolve(out.trim());
+      if (code !== 0) {
+        const msg = err.trim() || `PowerShell exited ${code}`;
+        if (msg.includes("null-valued") || msg.includes("Cannot call a method")) {
+          reject(new Error("Outlook is not running or not connected to Exchange. Please open Outlook and ensure it is fully loaded, then retry."));
+        } else {
+          reject(new Error(msg));
+        }
+      } else {
+        resolve(out.trim());
+      }
     });
   });
 }
@@ -161,7 +169,8 @@ try {
     if (!$json.StartsWith("[")) { $json = "[$json]" }
     Write-Output $json
 } catch {
-    Write-Error $_.Exception.Message
+    $msg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
+    Write-Error $msg
     exit 1
 }
 `;

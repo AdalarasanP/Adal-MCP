@@ -99,7 +99,8 @@ try {
     }
     $result | ConvertTo-Json -Depth 4 -Compress
 } catch {
-    Write-Error $_.Exception.Message
+    $msg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
+    Write-Error $msg
     exit 1
 }
 `;
