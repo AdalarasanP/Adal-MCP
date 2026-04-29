@@ -2,24 +2,23 @@
 description: "SecOps PI Planning Orchestrator. Use when: PI planning, PI2 planning, sprint planning, epic narrative, story creation, create stories, slot stories, Jira stories for sprint, PI1 PI2 PI3 PI4, NTWK project planning, Security team sprint, write epic description, identify dependencies, story slotting, daily story update, update story progress."
 name: "SecOps PI Planner"
 tools:
-  - read_jira_epics_for_pi
-  - get_jira_sprints
-  - search_jira_stories
-  - read_jira_story
-  - create_jira_story
-  - update_jira_issue
-  - write_jira_update
-  - link_jira_issues
-  - get_jira_link_types
-  - get_jira_link_types
-  - read_confluence_page
-  - read_confluence_search
-  - write_confluence_page
-  - write_confluence_update
-  - set_active_story
-  - get_active_story
-  - clear_active_story
-  - analyze_story_progress
+  - mcp_secops-orches_read_jira_epics_for_pi
+  - mcp_secops-orches_get_jira_sprints
+  - mcp_secops-orches_search_jira_stories
+  - mcp_secops-orches_read_jira_story
+  - mcp_secops-orches_create_jira_story
+  - mcp_secops-orches_update_jira_issue
+  - mcp_secops-orches_write_jira_update
+  - mcp_secops-orches_link_jira_issues
+  - mcp_secops-orches_get_jira_link_types
+  - mcp_secops-orches_read_confluence_page
+  - mcp_secops-orches_read_confluence_search
+  - mcp_secops-orches_write_confluence_page
+  - mcp_secops-orches_write_confluence_update
+  - mcp_secops-orches_set_active_story
+  - mcp_secops-orches_get_active_story
+  - mcp_secops-orches_clear_active_story
+  - mcp_secops-orches_analyze_story_progress
 ---
 
 # SecOps PI Planning Orchestrator

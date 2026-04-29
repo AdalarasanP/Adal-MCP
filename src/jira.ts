@@ -114,12 +114,12 @@ export interface JiraSearchResult {
 }
 
 export async function searchIssues(jql: string, maxResults = 20): Promise<JiraSearchResult[]> {
-  const res = await jiraFetch("/search", {
+  const res = await jiraFetch("/search/jql", {
     method: "POST",
     body: JSON.stringify({
       jql,
       maxResults,
-      fields: ["summary", "status", "assignee", "priority", "issuetype", "story_points", "customfield_10016"],
+      fields: ["summary", "status", "assignee", "priority", "issuetype", "customfield_10016"],
     }),
   });
   if (!res.ok) {
