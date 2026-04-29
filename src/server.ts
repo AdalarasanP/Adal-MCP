@@ -7,6 +7,7 @@ import { register as registerAnalyze } from "./tools/analyze/index.js";
 import { register as registerWrite } from "./tools/write/index.js";
 import { register as registerControl } from "./tools/control/index.js";
 import { registerObserveTools } from "./tools/observe/index.js";
+import { registerCommsTools } from "./tools/comms/index.js";
 
 const server = new McpServer(
   {
@@ -26,6 +27,7 @@ registerAnalyze(server);
 registerWrite(server);
 registerControl(server);
 registerObserveTools(server);
+registerCommsTools(server);
 
 async function main() {
   const transport = new StdioServerTransport();

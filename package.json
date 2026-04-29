@@ -7,12 +7,14 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "capture": "node dist/capture/daemon.js",
-    "index": "node -e \"import('./dist/capture/indexer.js').then(m => m.buildIndex())\""
+    "index": "node -e \"import('./dist/capture/indexer.js').then(m => m.buildIndex())\"",
+    "auth-graph": "node -e \"import('./dist/capture/graph-auth.js').then(m => m.getAccessToken()).then(() => { console.log('Authentication successful!'); process.exit(0); })\""
   },
   "keywords": [],
   "author": "Adalarasan Pandian",
   "license": "ISC",
   "dependencies": {
+    "@azure/msal-node": "^5.1.5",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^17.4.2",
     "zod": "^4.3.6"
