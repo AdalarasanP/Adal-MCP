@@ -1,17 +1,10 @@
 /**
  * Microsoft Graph authentication using MSAL device code flow.
- * Token is cached to disk so you only need to sign in once.
+ * Uses the Microsoft Graph PowerShell public client (pre-trusted in all Azure AD tenants)
+ * so no app registration is needed.
  *
- * Setup:
- *   1. Register an Azure AD app at portal.azure.com
- *      - Platform: Mobile/Desktop, Redirect URI: http://localhost
- *      - Permissions: Mail.Read, Mail.ReadWrite, User.Read, People.Read, offline_access
- *   2. Add to .env:
- *      AZURE_CLIENT_ID=<your-app-client-id>
- *      AZURE_TENANT_ID=<your-tenant-id>
- *
- * First use: run `npm run auth-graph` — opens browser, you sign in once.
- * After that: tokens auto-refresh silently.
+ * First use: run `npm run auth-graph` — prints a code, you open a URL, sign in once.
+ * After that: tokens auto-refresh silently from the cache.
  */
 
 import { PublicClientApplication, DeviceCodeRequest, AccountInfo, SilentFlowRequest } from "@azure/msal-node";
@@ -29,14 +22,10 @@ const SCOPES = [
   "offline_access",
 ];
 
-function getClientConfig() {
-  const clientId = process.env.AZURE_CLIENT_ID;
-  const tenantId = process.env.AZURE_TENANT_ID;
-  if (!clientId || !tenantId) {
-    throw new Error("AZURE_CLIENT_ID and AZURE_TENANT_ID must be set in .env");
-  }
-  return { clientId, tenantId };
-}
+// Microsoft Graph PowerShell — a Microsoft-owned public client app trusted in all
+// Azure AD tenants by default. No app registration required.
+const CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
+const TENANT_ID = process.env.AZURE_TENANT_ID ?? "d2033364-dec3-4a1c-9772-3f41ca7c4b75"; // Marriott
 
 function loadCacheData(): string | undefined {
   if (fs.existsSync(TOKEN_CACHE_FILE)) {
@@ -56,12 +45,11 @@ let _account: AccountInfo | null = null;
 
 function getPca(): PublicClientApplication {
   if (_pca) return _pca;
-  const { clientId, tenantId } = getClientConfig();
 
   const pca = new PublicClientApplication({
     auth: {
-      clientId,
-      authority: `https://login.microsoftonline.com/${tenantId}`,
+      clientId: CLIENT_ID,
+      authority: `https://login.microsoftonline.com/${TENANT_ID}`,
     },
     cache: {
       cachePlugin: {
