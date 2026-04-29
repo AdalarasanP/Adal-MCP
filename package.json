@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "capture": "node dist/capture/daemon.js",
+    "index": "node -e \"import('./dist/capture/indexer.js').then(m => m.buildIndex())\""
   },
   "keywords": [],
   "author": "Adalarasan Pandian",
