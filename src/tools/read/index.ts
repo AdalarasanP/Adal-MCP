@@ -1,12 +1,67 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getIssue } from "../../jira.js";
+import { getIssue, searchIssues } from "../../jira.js";
 import { getPage, searchPages } from "../../confluence.js";
 
 export function register(server: McpServer): void {
   server.tool(
+    "search_jira_stories",
+    "Search Jira issues using JQL or natural filters (project, sprint, assignee, status, team)",
+    {
+      project: z.string().optional().describe("Jira project key e.g. NTWK"),
+      sprint: z.string().optional().describe("Sprint name or partial name e.g. 'Sprint 2 PI2'"),
+      team: z.string().optional().describe("Agile team name e.g. Security"),
+      assignee: z.string().optional().describe("Assignee display name or 'currentUser'"),
+      status: z.string().optional().describe("Status name e.g. 'In Progress', 'To Do'"),
+      jql: z.string().optional().describe("Raw JQL override — used as-is if provided"),
+      maxResults: z.number().min(1).max(50).optional(),
+    },
+    async (args) => {
+      let jql = args.jql ?? "";
+      if (!jql) {
+        const clauses: string[] = [];
+        if (args.project) clauses.push(`project = "${args.project}"`);
+        if (args.sprint) clauses.push(`sprint = "${args.sprint}"`);
+        if (args.team) clauses.push(`team = "${args.team}"`);
+        if (args.assignee) {
+          clauses.push(
+            args.assignee === "currentUser"
+              ? "assignee = currentUser()"
+              : `assignee = "${args.assignee}"`
+          );
+        }
+        if (args.status) clauses.push(`status = "${args.status}"`);
+        clauses.push("ORDER BY updated DESC");
+        jql = clauses.join(" AND ");
+      }
+      const issues = await searchIssues(jql, args.maxResults ?? 20);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                jql,
+                total: issues.length,
+                issues: issues.map((i) => ({
+                  key: i.key,
+                  type: i.fields.issuetype.name,
+                  summary: i.fields.summary,
+                  status: i.fields.status.name,
+                  assignee: i.fields.assignee?.displayName ?? "Unassigned",
+                  priority: i.fields.priority?.name ?? "None",
+                })),
+              },
+              null, 2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
     "read_jira_story",
-    "Fetch a Jira story's details (summary, status, assignee, priority, comment count)",
     {
       jiraKey: z.string(),
     },

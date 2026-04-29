@@ -100,3 +100,40 @@ export async function transitionIssue(issueKey: string, statusName: string): Pro
   }
   return match.name;
 }
+
+export interface JiraSearchResult {
+  key: string;
+  fields: {
+    summary: string;
+    status: { name: string };
+    assignee: { displayName: string } | null;
+    priority: { name: string } | null;
+    issuetype: { name: string };
+    story_points?: number;
+  };
+}
+
+export async function searchIssues(jql: string, maxResults = 20): Promise<JiraSearchResult[]> {
+  const res = await jiraFetch("/search", {
+    method: "POST",
+    body: JSON.stringify({
+      jql,
+      maxResults,
+      fields: ["summary", "status", "assignee", "priority", "issuetype", "story_points", "customfield_10016"],
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Jira search failed: ${res.status} ${await res.text()}`);
+  }
+  const data = (await res.json()) as { issues: Array<{ key: string; fields: Record<string, unknown> }> };
+  return data.issues.map((i) => ({
+    key: i.key,
+    fields: {
+      summary: i.fields.summary as string,
+      status: i.fields.status as { name: string },
+      assignee: i.fields.assignee as { displayName: string } | null,
+      priority: i.fields.priority as { name: string } | null,
+      issuetype: i.fields.issuetype as { name: string },
+    },
+  }));
+}
